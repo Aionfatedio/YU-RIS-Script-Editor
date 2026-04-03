@@ -118,9 +118,9 @@ class SettingsPage(ScrollArea):
         cl3.setSpacing(6)
         cl3.addWidget(BodyLabel("YU-RIS Script Editor"))
         cl3.addWidget(CaptionLabel("支持 YU-RIS V2 / V5 引擎"))
-        link_repo = HyperlinkLabel("项目地址", "https://www.example.com")
+        link_repo = HyperlinkLabel("项目地址", "https://github.com/Aionfatedio/YU-RIS-Script-Editor")
         link_repo.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl("https://www.example.com")))
+            lambda: QDesktopServices.openUrl(QUrl("https://github.com/Aionfatedio/YU-RIS-Script-Editor")))
         cl3.addWidget(link_repo)
         cl3.addWidget(BodyLabel("感谢以下项目提供的工具和思路"))
         thanks_row = QHBoxLayout()
