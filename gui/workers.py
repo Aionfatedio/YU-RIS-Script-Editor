@@ -94,7 +94,7 @@ class AnalysisWorker(QThread):
                 'name': f.name, 'path': str(f),
                 'size': f.stat().st_size, 'text_count': tc,
                 'type': '剧情脚本' if tc > 0 else (
-                    '控制脚本' if tc == 0 else '解析失败'),
+                    '控制脚本' if tc == 0 else '未知'),
             })
             if (i + 1) % 5 == 0:
                 self.progress.emit(f'分析中 {i+1}/{len(ybn_files)}')
@@ -229,7 +229,7 @@ class AnalysisWorker(QThread):
                 'name': fname, 'path': e.path,
                 'size': e.decomp_size, 'text_count': tc,
                 'type': '剧情脚本' if tc > 0 else (
-                    '控制脚本' if tc == 0 else '解析失败'),
+                    '控制脚本' if tc == 0 else '未知'),
             })
             if (i + 1) % 10 == 0:
                 self.progress.emit(f'分析中 {i+1}/{len(ybn_entries)}')

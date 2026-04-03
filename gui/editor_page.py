@@ -424,7 +424,7 @@ class EditorPage(QWidget):
             self.line_info.setText(f"第 {line} 行 | 共 {total} 行")
         else:
             total = len(self._entries) if self._entries else 0
-            self.line_info.setText(f"第 {line} 行 | 共 {total} 条文本")
+            self.line_info.setText(f"第 {line} 行 | 共 {total} 行文本")
 
     def _on_enc_change(self, text):
         if not self._path or not self._enabled:

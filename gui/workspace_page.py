@@ -78,7 +78,7 @@ class DropZone(QFrame):
         p.setFont(f)
         p.drawText(self.rect(), Qt.AlignCenter,
                    "拖放文件到此处  或  点击选择文件\n"
-                   "支持 .ybn 脚本 | .ypf 封包 | .txt 脚本 | ysbin 文件夹")
+                   "支持 .ybn 脚本 | .ypf 封包 | ysbin 文件夹")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
