@@ -116,8 +116,7 @@ class SettingsPage(ScrollArea):
         cl3 = QVBoxLayout(card3)
         cl3.setContentsMargins(20, 14, 20, 14)
         cl3.setSpacing(6)
-        cl3.addWidget(BodyLabel("YU-RIS Script Editor [V1.0.0]"))
-        cl3.addWidget(CaptionLabel("使用方法：加载脚本文件，双击列表项进行编辑"))
+        cl3.addWidget(BodyLabel("YU-RIS Script Editor V1.0.0"))
         link_repo = HyperlinkLabel("项目地址", "https://github.com/Aionfatedio/YU-RIS-Script-Editor")
         link_repo.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl("https://github.com/Aionfatedio/YU-RIS-Script-Editor")))

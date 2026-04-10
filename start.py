@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QFont
 from qfluentwidgets import setTheme, Theme
 
-from yuris_toolkit.gui.main_window import MainWindow
+from gui.main_window import MainWindow
 
 QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)

@@ -31,7 +31,7 @@ class AnalysisWorker(QThread):
 
     # ------------------------------------------------------------------
     def _file(self, path: Path) -> dict:
-        from yuris_toolkit.core.ystb import YSTBFile
+        from core.ystb import YSTBFile
         data = path.read_bytes()
         if len(data) < 0x20 or data[:4] != b'YSTB':
             return {'mode': 'file', 'path': str(path),
@@ -69,7 +69,7 @@ class AnalysisWorker(QThread):
         }
 
     def _folder(self, path: Path) -> dict:
-        from yuris_toolkit.core.ystb import YSTBFile
+        from core.ystb import YSTBFile
         ybn_files = sorted(path.glob('*.ybn'))
         if not ybn_files:
             return {'mode': 'folder', 'path': str(path),
@@ -171,8 +171,8 @@ class AnalysisWorker(QThread):
         return '', []
 
     def _ypf(self, path: Path) -> dict:
-        from yuris_toolkit.core.ypf import YPFReader
-        from yuris_toolkit.core.ystb import YSTBFile
+        from core.ypf import YPFReader
+        from core.ystb import YSTBFile
 
         self.progress.emit(f'解析 {path.name} 索引...')
         reader = YPFReader(str(path))

@@ -355,7 +355,7 @@ class EditorPage(QWidget):
         self._ypf_context = ctx
 
     def load_file(self, path: str, key: int, encoding: str):
-        from yuris_toolkit.core.ystb import YSTBFile
+        from core.ystb import YSTBFile
 
         self._is_txt_mode = False
         self._path = path
@@ -468,12 +468,12 @@ class EditorPage(QWidget):
             self._do_save(path, writeback_ypf=False)
 
     def _do_save(self, target_path: str, writeback_ypf: bool = True):
-        from yuris_toolkit.core.ystb import YSTBFile
+        from core.ystb import YSTBFile
 
         target = Path(target_path)
         if target.exists():
             try:
-                from yuris_toolkit.gui.settings_page import Settings
+                from gui.settings_page import Settings
                 if Settings.load().auto_backup:
                     bak = target.with_suffix(target.suffix + '.bak')
                     shutil.copy2(str(target), str(bak))
@@ -600,7 +600,7 @@ class EditorPage(QWidget):
         target = Path(target_path)
         if target.exists():
             try:
-                from yuris_toolkit.gui.settings_page import Settings
+                from gui.settings_page import Settings
                 if Settings.load().auto_backup:
                     bak = target.with_suffix(target.suffix + '.bak')
                     shutil.copy2(str(target), str(bak))

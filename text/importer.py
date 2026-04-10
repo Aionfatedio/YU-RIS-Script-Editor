@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from yuris_toolkit.core.ystb import YSTBFile
+from core.ystb import YSTBFile
 
 class TextImporter:
     @staticmethod

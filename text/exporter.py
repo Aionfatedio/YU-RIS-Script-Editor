@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from yuris_toolkit.core.ystb import YSTBFile, TextEntry
+from core.ystb import YSTBFile, TextEntry
 
 
 class TextExporter:

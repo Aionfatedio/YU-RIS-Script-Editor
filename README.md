@@ -22,7 +22,7 @@ Python 3.10+
 ```bash
 git clone https://github.com/Aionfatedio/YU-RIS-Script-Editor.git
 
-cd yuris_toolkit
+cd YU-RIS-Script-Editor
 
 pip install PyQt5 PyQt-Fluent-Widgets
 
@@ -61,13 +61,13 @@ python start.py
 
 ### 编辑器
 
-| 操作 | 说明 |
-|------|------|
+| 操作     | 说明                                                         |
+| -------- | ------------------------------------------------------------ |
 | 文本编辑 | 在编辑器中预览修改，保存生效。`[OPT]` 前缀表示选项文本，请保留 |
-| 搜索替换 | `Ctrl+F` 打开搜索替换栏，支持上下导航和批量替换 |
-| 编码切换 | 适用于需要更换编码查看的场景 |
-| 保存 | 点击「保存」写回原文件（纯脚本 YPF 自动封包） |
-| 另存为 | 点击「另存为」导出为独立 YBN 文件 |
+| 搜索替换 | `Ctrl+F` 打开搜索替换栏，支持上下导航和批量替换              |
+| 编码切换 | 适用于需要更换编码查看的场景                                 |
+| 保存     | 点击「保存」写回原文件（纯脚本 YPF 自动封包）                |
+| 另存为   | 点击「另存为」导出为独立 YBN 文件                            |
 
 ## 项目结构
 
@@ -104,4 +104,3 @@ yuris_toolkit/
 - **[YURIS_TOOLS](https://github.com/jyxjyx1234/YURIS_TOOLS)** by [jyxjyx1234](https://github.com/jyxjyx1234). 提供了新版 YU-RIS 引擎的解密算法
 - **[RxYuris](https://github.com/ZQF-ReVN/RxYuris)** by [ZQF-ReVN](https://github.com/ZQF-ReVN). 提供了旧版 YU-RIS 引擎的解密算法
 - [**GARbro**](https://github.com/morkt/GARbro) by [morkt](https://github.com/morkt). 提供了 YPF 封包的解密算法
-

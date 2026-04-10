@@ -180,7 +180,7 @@ class WorkspacePage(ScrollArea):
 
         self.table = TableWidget()
         self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["文件名", "大小", "类型"])
+        self.table.setHorizontalHeaderLabels(["文件名 (双击列表项进行编辑)", "大小", "类型"])
         self.table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(
@@ -413,7 +413,7 @@ class WorkspacePage(ScrollArea):
 
     def _populate_table(self, files: list):
         self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["文件名", "大小", "类型"])
+        self.table.setHorizontalHeaderLabels(["文件名 (双击列表项进行编辑)", "大小", "类型"])
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(0, hdr.Stretch)
         hdr.setSectionResizeMode(1, hdr.ResizeToContents)
@@ -564,7 +564,7 @@ class WorkspacePage(ScrollArea):
                 self._ypf_save_context = None
 
             if is_txt:
-                from yuris_toolkit.gui.editor_page import EditorPage
+                from gui.editor_page import EditorPage
                 win = self.window()
                 win.editor.set_ypf_context(self._ypf_save_context)
                 win.editor.load_txt_file(tmp_path)
@@ -583,8 +583,8 @@ class WorkspacePage(ScrollArea):
         out = QFileDialog.getExistingDirectory(self, "选择输出目录")
         if not out:
             return
-        from yuris_toolkit.core.ystb import YSTBFile
-        from yuris_toolkit.text.exporter import TextExporter
+        from core.ystb import YSTBFile
+        from text.exporter import TextExporter
         fn = (TextExporter.export_raw if fmt == 'raw'
               else TextExporter.export_triline)
         key = r.get('key', 0)
@@ -637,7 +637,7 @@ class WorkspacePage(ScrollArea):
         out = QFileDialog.getExistingDirectory(self, "解密输出目录")
         if not out:
             return
-        from yuris_toolkit.core.ystb import YSTBFile
+        from core.ystb import YSTBFile
         key = r.get('key', 0)
         try:
             if r['mode'] == 'file':
