@@ -72,7 +72,7 @@ python start.py
 ## 项目结构
 
 ```
-yuris_toolkit/
+YU-RIS-Script-Editor/
   start.py              # 入口
   config.json           # 用户配置
   core/
