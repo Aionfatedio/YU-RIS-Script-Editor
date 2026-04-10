@@ -586,9 +586,9 @@ class EditorPage(QWidget):
         self.enc_combo.setEnabled(False)
 
         if self._ypf_context:
-            ypf_s = '  [来源:脚本YPF]'
+            ypf_s = '  [Script YPF]'
         elif self._from_ypf:
-            ypf_s = '  [来源:资源YPF]'
+            ypf_s = '  [Archive YPF]'
         else:
             ypf_s = ''
         self.file_label.setText(f"{Path(path).name}  [TXT]{ypf_s}")
