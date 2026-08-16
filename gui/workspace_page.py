@@ -1,17 +1,40 @@
 from pathlib import Path
+
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QPainter, QColor, QPen, QFont
+from PyQt5.QtGui import QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
-    QFileDialog, QHeaderView, QTableWidgetItem, QSizePolicy
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QSizePolicy,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, StrongBodyLabel,
-    PushButton, PrimaryPushButton, TextEdit, CardWidget,
-    FluentIcon, InfoBar, InfoBarPosition, ScrollArea,
-    TableWidget, isDarkTheme, ProgressBar, IndeterminateProgressBar
+    CaptionLabel,
+    CardWidget,
+    FluentIcon,
+    InfoBar,
+    InfoBarPosition,
+    PrimaryPushButton,
+    ProgressBar,
+    PushButton,
+    ScrollArea,
+    StrongBodyLabel,
+    TableWidget,
+    TextEdit,
+    isDarkTheme,
 )
-from .workers import AnalysisWorker
+
+from application.documents import ArchiveBinding, DocumentRequest
+from core.encoding import Encoding
+from core.ypf import YPFReader
+
+from .theme import info_html
+from .workers import AnalysisWorker, BatchOperationWorker
 
 
 def _fmt(n: int) -> str:
@@ -33,23 +56,12 @@ class _SizeItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
-def _info_html(rows: list[tuple[str, str]]) -> str:
-    lines = ['<table cellspacing="3" style="white-space:nowrap;font-size:9pt;">']
-    for label, value in rows:
-        lines.append(
-            f'<tr>'
-            f'<td style="color:rgba(255,255,255,0.45);padding-right:12px;">{label}</td>'
-            f'<td style="color:rgba(255,255,255,0.85);">{value}</td>'
-            f'</tr>')
-    lines.append('</table>')
-    return ''.join(lines)
-
-
 class DropZone(QFrame):
     fileDropped = pyqtSignal(list)  
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._hover = False
         self.setAcceptDrops(True)
         self.setFixedHeight(130)
         self.setCursor(Qt.PointingHandCursor)
@@ -58,8 +70,7 @@ class DropZone(QFrame):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = self.rect().adjusted(4, 4, -4, -4)
-        hover = getattr(self, '_hover', False)
-        if hover:
+        if self._hover:
             bg, bc = QColor(0, 120, 212, 25), QColor(0, 120, 212)
         else:
             bg = QColor(255, 255, 255, 8) if isDarkTheme() else QColor(0, 0, 0, 6)
@@ -70,21 +81,25 @@ class DropZone(QFrame):
         p.setPen(QPen(bc, 1.5, Qt.DashLine))
         p.setBrush(Qt.NoBrush)
         p.drawRoundedRect(r.adjusted(2, 2, -2, -2), 6, 6)
-        tc = QColor(0, 120, 212) if hover else (
+        tc = QColor(0, 120, 212) if self._hover else (
             QColor(170, 170, 170) if isDarkTheme() else QColor(100, 100, 100))
         p.setPen(tc)
         f = QFont()
         f.setPointSize(11)
         p.setFont(f)
         p.drawText(self.rect(), Qt.AlignCenter,
-                   "拖放文件到此处  或  点击选择文件\n"
-                   "支持 .ybn 脚本 | .ypf 封包 | ysbin 文件夹")
+                   "拖放文件到此处 · 左键选择文件 · 右键选择文件夹\n"
+                   "支持 .ybn 脚本 | .ypf 封包 | .txt 文本 | ysbin 文件夹")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             path, _ = QFileDialog.getOpenFileName(
                 self, "选择文件", "",
                 "支持的文件 (*.ybn *.ypf *.exe *.txt);;所有文件 (*)")
+            if path:
+                self.fileDropped.emit([path])
+        elif event.button() == Qt.RightButton:
+            path = QFileDialog.getExistingDirectory(self, "选择 ysbin 文件夹")
             if path:
                 self.fileDropped.emit([path])
 
@@ -107,7 +122,7 @@ class DropZone(QFrame):
 
 
 class WorkspacePage(ScrollArea):
-    openInEditor = pyqtSignal(str, int, str, bool)
+    openDocument = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -115,8 +130,8 @@ class WorkspacePage(ScrollArea):
         self.setWidgetResizable(True)
         self.enableTransparentBackground()
         self._worker = None
+        self._batch_worker = None
         self._result = None
-        self._ypf_save_context = None  
 
         c = QWidget()
         c.setStyleSheet("background: transparent;")
@@ -141,7 +156,7 @@ class WorkspacePage(ScrollArea):
         self.info_body.setTextFormat(Qt.RichText)
         self.info_body.setTextInteractionFlags(
             Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
-        self.info_body.setStyleSheet("color: rgba(255,255,255,0.75); background: transparent;")
+        self.info_body.setStyleSheet("background: transparent;")
         ic.addWidget(self.info_title)
         ic.addWidget(self.info_body)
         self.info_card.hide()
@@ -180,7 +195,7 @@ class WorkspacePage(ScrollArea):
 
         self.table = TableWidget()
         self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["文件名 (双击列表项进行编辑)", "大小", "类型"])
+        self.table.setHorizontalHeaderLabels(["文件名", "大小", "类型"])
         self.table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(
@@ -226,17 +241,30 @@ class WorkspacePage(ScrollArea):
 
     def _on_drop(self, paths):
         p = paths[0]
-        if self._worker and self._worker.isRunning():
+        if ((self._worker and self._worker.isRunning())
+                or (self._batch_worker and self._batch_worker.isRunning())):
             return
         self._hide_all()
+        self.drop.setEnabled(False)
         self.status.setText(f"分析: {Path(p).name} ...")
         self._worker = AnalysisWorker(p)
         self._worker.progress.connect(lambda m: self.status.setText(m))
-        self._worker.finished.connect(self._done)
-        self._worker.error.connect(
-            lambda m: (self.status.setText("ERROR"),
-                       self._show_err(m)))
+        self._worker.resultReady.connect(self._done)
+        self._worker.failed.connect(self._analysis_failed)
+        self._worker.finished.connect(self._analysis_finished)
         self._worker.start()
+
+    def _analysis_failed(self, message: str):
+        self.status.setText("ERROR")
+        self._show_err(message)
+
+    def _analysis_finished(self):
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if not (self._batch_worker and self._batch_worker.isRunning()):
+            self.drop.setEnabled(True)
 
     def _hide_all(self):
         for w in (self.info_card, self.action_bar, self.table,
@@ -271,19 +299,19 @@ class WorkspacePage(ScrollArea):
         self.status.setText("分析完成")
         ks = f"0x{r['key']:08X}" if r['key'] else 'N/A'
         self.info_title.setText(Path(r['path']).name)
-        self.info_body.setText(_info_html([
+        self.info_body.setText(info_html([
             ("文件类型", r['file_type']),
             ("文件大小", _fmt(r['size'])),
             ("加密密钥", ks),
             ("引擎版本", str(r['version'])),
             ("文本编码", r['encoding'].upper()),
             ("文本条数", f"{r['text_count']:,} 条"),
-        ]))
+        ], isDarkTheme()))
         self.info_card.show()
         self.btn_editor.setVisible(r['is_text'])
         self.btn_raw.setVisible(r['is_text'])
-        self.btn_tri.setVisible(r['is_text'])
-        self.btn_dec.setVisible(r['key'] != 0)
+        self.btn_tri.setVisible(r['is_text'] and r.get('kind') != 'text')
+        self.btn_dec.setVisible(r.get('kind') != 'text' and r['key'] != 0)
         self.btn_ypf_all.hide()
         self.action_bar.show()
         if r['is_text'] and r.get('preview'):
@@ -293,22 +321,25 @@ class WorkspacePage(ScrollArea):
             self.preview.setText(r['preview'])
             self.preview.show()
         if r['is_text']:
-            self.openInEditor.emit(
-                r['path'], r.get('key', 0),
-                r.get('encoding', 'shift_jis'), False)
+            self.openDocument.emit(self._file_request(r, switch=False))
 
     def _show_folder(self, r):
         self.status.setText(f"完成 - {r['file_count']} 个文件")
         ks = f"0x{r['key']:08X}" if r['key'] else 'N/A'
         self.info_title.setText(f"{Path(r['path']).name}/")
-        ctrl = r['file_count'] - r['text_script_count']
-        self.info_body.setText(_info_html([
+        story = sum(item['text_count'] > 0 for item in r['files'])
+        ctrl = sum(item['text_count'] == 0 for item in r['files'])
+        unknown = sum(item['text_count'] < 0 for item in r['files'])
+        rows = [
             ("YBN 文件", f"{r['file_count']} 个"),
             ("加密密钥", ks),
             ("文本编码", r.get('encoding', 'shift_jis').upper()),
-            ("剧情脚本", f"{r['text_script_count']} 个"),
+            ("剧情脚本", f"{story} 个"),
             ("控制脚本", f"{ctrl} 个"),
-        ]))
+        ]
+        if unknown:
+            rows.append(("未知脚本", f"{unknown} 个"))
+        self.info_body.setText(info_html(rows, isDarkTheme()))
         self.info_card.show()
         self.btn_editor.hide()
         self.btn_raw.setVisible(r['text_script_count'] > 0)
@@ -325,7 +356,7 @@ class WorkspacePage(ScrollArea):
         rows = [("游戏程序", r['exe_name'])]
         for yf in ypf_files:
             rows.append((yf['name'], _fmt(yf['size'])))
-        self.info_body.setText(_info_html(rows))
+        self.info_body.setText(info_html(rows, isDarkTheme()))
         self.info_card.show()
         self.btn_editor.hide()
         self.btn_raw.hide()
@@ -342,7 +373,9 @@ class WorkspacePage(ScrollArea):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(ypf_files))
         for i, yf in enumerate(ypf_files):
-            self.table.setItem(i, 0, QTableWidgetItem(yf['name']))
+            name_item = QTableWidgetItem(yf['name'])
+            name_item.setData(Qt.UserRole, yf['path'])
+            self.table.setItem(i, 0, name_item)
             self.table.setItem(i, 1, _SizeItem(yf['size']))
         self.table.setSortingEnabled(True)
         self.table.show()
@@ -367,34 +400,44 @@ class WorkspacePage(ScrollArea):
         ks = f"0x{r['key']:08X}" if r['key'] else 'N/A'
         folders = r.get('folders', {})
         folders_str = ' / '.join(f"{k} ({v})" for k, v in folders.items())
-        ctrl = r['file_count'] - r['text_script_count']
+        ybn_files = [item for item in r['files'] if not item.get('is_txt')]
+        story = sum(item['text_count'] > 0 for item in ybn_files)
+        ctrl = sum(item['text_count'] == 0 for item in ybn_files)
+        unknown = sum(item['text_count'] < 0 for item in ybn_files)
         self.info_title.setText(Path(r['path']).name)
 
         if resource_only:
             ext_str = ', '.join(f"{k} ({v})" for k, v
                                 in r.get('ext_counts', {}).items())
-            self.info_body.setText(_info_html([
+            self.info_body.setText(info_html([
                 ("YPF 总文件", f"{r['ypf_total']:,} 个，{_fmt(r['ypf_size'])}"),
                 ("资源目录", folders_str),
                 ("文件类型", ext_str or '(无)'),
-            ]))
+            ], isDarkTheme()))
         elif has_txt and not has_ybn:
-            self.info_body.setText(_info_html([
+            self.info_body.setText(info_html([
                 ("YPF 总文件", f"{r['ypf_total']:,} 个，{_fmt(r['ypf_size'])}"),
                 ("脚本目录", script_folder),
                 ("TXT", f"{r['file_count']} 个"),
                 ("资源目录", folders_str),
-            ]))
+            ], isDarkTheme()))
         else:
-            self.info_body.setText(_info_html([
+            rows = [
                 ("YPF 总文件", f"{r['ypf_total']:,} 个，{_fmt(r['ypf_size'])}"),
                 ("脚本目录", f"{script_folder} ({r['file_count']} 个)"),
                 ("加密密钥", ks),
                 ("文本编码", r.get('encoding', 'shift_jis').upper()),
-                ("剧情脚本", f"{r['text_script_count']} 个"),
+                ("剧情脚本", f"{story} 个"),
                 ("控制脚本", f"{ctrl} 个"),
-                ("资源目录", folders_str),
-            ]))
+            ]
+            if has_txt:
+                txt_count = sum(
+                    item.get('is_txt', False) for item in r['files'])
+                rows.append(("TXT 脚本", f"{txt_count} 个"))
+            if unknown:
+                rows.append(("未知脚本", f"{unknown} 个"))
+            rows.append(("资源目录", folders_str))
+            self.info_body.setText(info_html(rows, isDarkTheme()))
         self.info_card.show()
 
         # --- Button visibility ---
@@ -413,14 +456,14 @@ class WorkspacePage(ScrollArea):
 
     def _populate_table(self, files: list):
         self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["文件名 (双击列表项进行编辑)", "大小", "类型"])
+        self.table.setHorizontalHeaderLabels(["文件名", "大小", "类型"])
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(0, hdr.Stretch)
         hdr.setSectionResizeMode(1, hdr.ResizeToContents)
         hdr.setSectionResizeMode(2, hdr.ResizeToContents)
 
         # Build dynamic type set, init new types as True
-        all_types = sorted(set(f['type'] for f in files))
+        all_types = sorted({f['type'] for f in files})
         for t in all_types:
             if t not in self._filter_types:
                 self._filter_types[t] = True
@@ -433,7 +476,9 @@ class WorkspacePage(ScrollArea):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(filtered))
         for i, f in enumerate(filtered):
-            self.table.setItem(i, 0, QTableWidgetItem(f['name']))
+            name_item = QTableWidgetItem(f.get('display_name', f['name']))
+            name_item.setData(Qt.UserRole, f['path'])
+            self.table.setItem(i, 0, name_item)
             self.table.setItem(i, 1, _SizeItem(f['size']))
             tp = f['type']
             if f.get('is_txt') and f['text_count'] > 0:
@@ -447,7 +492,7 @@ class WorkspacePage(ScrollArea):
         self.btn_filter.setVisible(len(all_types) > 1)
 
     def _show_filter_popup(self):
-        from qfluentwidgets import Flyout, FlyoutViewBase, CheckBox, PrimaryPushButton
+        from qfluentwidgets import CheckBox, Flyout, FlyoutViewBase, PrimaryPushButton
 
         page = self
         types = dict(page._filter_types)  # snapshot
@@ -498,9 +543,18 @@ class WorkspacePage(ScrollArea):
         r = self._result
         if not r or not r.get('is_text'):
             return
-        self.openInEditor.emit(
-            r['path'], r.get('key', 0),
-            r.get('encoding', 'shift_jis'), True)
+        self.openDocument.emit(self._file_request(r, switch=True))
+
+    @staticmethod
+    def _file_request(result: dict, switch: bool = True) -> DocumentRequest:
+        return DocumentRequest(
+            display_name=Path(result['path']).name,
+            kind=result.get('kind', 'ystb'),
+            source_path=Path(result['path']),
+            key=result.get('key', 0),
+            source_encoding=result.get('encoding', Encoding.SJIS),
+            switch_to_editor=switch,
+        )
 
 
     def _table_dblclick(self, idx):
@@ -510,16 +564,16 @@ class WorkspacePage(ScrollArea):
         name_item = self.table.item(idx.row(), 0)
         if not name_item:
             return
-        clicked_name = name_item.text()
+        identity = name_item.data(Qt.UserRole)
 
         if r['mode'] == 'exe':
             ypf_files = r.get('ypf_files', [])
-            yf = next((x for x in ypf_files if x['name'] == clicked_name), None)
+            yf = next((x for x in ypf_files if x['path'] == identity), None)
             if yf:
                 self._on_drop([yf['path']])
             return
 
-        f = next((x for x in r['files'] if x['name'] == clicked_name), None)
+        f = next((x for x in r['files'] if x['path'] == identity), None)
         if not f:
             return
 
@@ -531,49 +585,35 @@ class WorkspacePage(ScrollArea):
         if r['mode'] == 'ypf':
             self._open_ypf_entry_in_editor(f)
         else:
-            self.openInEditor.emit(
-                f['path'], r.get('key', 0),
-                r.get('encoding', 'shift_jis'), True)
+            self.openDocument.emit(DocumentRequest(
+                display_name=Path(f['path']).name,
+                kind='text' if is_txt else 'ystb',
+                source_path=Path(f['path']),
+                key=r.get('key', 0),
+                source_encoding=f.get('encoding', r.get('encoding', Encoding.SJIS)),
+            ))
 
     def _open_ypf_entry_in_editor(self, f: dict):
         r = self._result
-        reader = r.get('_reader')
-        if not reader:
-            return
-        entry = reader.find_entry(f['path'])
-        if not entry:
-            return
-        import tempfile, os
-        tmp_dir = os.path.join(tempfile.gettempdir(), 'yuris_toolkit_ypf')
-        os.makedirs(tmp_dir, exist_ok=True)
-        tmp_path = os.path.join(tmp_dir, f['name'])
         is_txt = f.get('is_txt', False)
         try:
+            reader = YPFReader(r['path'])
+            entry = reader.find_entry(f['path'])
+            if not entry:
+                raise ValueError(f"YPF 中未找到 {f['path']}")
             data = reader.extract(entry)
-            with open(tmp_path, 'wb') as fp:
-                fp.write(data)
-
-            if r.get('script_only'):
-                self._ypf_save_context = {
-                    'ypf_path': r['path'],
-                    'entry_path': f['path'],
-                    'reader': reader,
-                    'is_txt': is_txt,
-                }
-            else:
-                self._ypf_save_context = None
-
-            if is_txt:
-                from gui.editor_page import EditorPage
-                win = self.window()
-                win.editor.set_ypf_context(self._ypf_save_context)
-                win.editor.load_txt_file(tmp_path)
-                win.switchTo(win.editor)
-            else:
-                self.openInEditor.emit(
-                    tmp_path, r.get('key', 0),
-                    r.get('encoding', 'shift_jis'), True)
-        except Exception as e:
+            binding = ArchiveBinding(
+                archive_path=Path(r['path']), entry_path=f['path'],
+                writable=bool(r.get('script_only')))
+            self.openDocument.emit(DocumentRequest(
+                display_name=f.get('display_name', f['name']),
+                kind='text' if is_txt else 'ystb',
+                source_bytes=data,
+                key=r.get('key', 0),
+                source_encoding=f.get('encoding', r.get('encoding', Encoding.SJIS)),
+                archive=binding,
+            ))
+        except Exception as e:  # noqa: BLE001 - GUI error boundary
             self._err(str(e))
 
     def _export(self, fmt):
@@ -583,52 +623,7 @@ class WorkspacePage(ScrollArea):
         out = QFileDialog.getExistingDirectory(self, "选择输出目录")
         if not out:
             return
-        from core.ystb import YSTBFile
-        from text.exporter import TextExporter
-        fn = (TextExporter.export_raw if fmt == 'raw'
-              else TextExporter.export_triline)
-        key = r.get('key', 0)
-        enc = r.get('encoding', 'shift_jis')
-        try:
-            if r['mode'] == 'file':
-                ystb = YSTBFile.from_file(r['path'], key=key)
-                stem = Path(r['path']).stem
-                n = fn(ystb, str(Path(out) / f"{stem}.txt"), enc)
-                self._ok(f"已导出 {n} 条 → {stem}.txt")
-            elif r['mode'] in ('folder', 'ypf'):
-                cnt = 0
-                reader = r.get('_reader')
-                for f in r['files']:
-                    if f['text_count'] <= 0:
-                        continue
-                    try:
-                        if f.get('is_txt'):
-                            # TXT: extract raw content
-                            if reader:
-                                entry = reader.find_entry(f['path'])
-                                if not entry:
-                                    continue
-                                data = reader.extract(entry)
-                                (Path(out) / f['name']).write_bytes(data)
-                                cnt += 1
-                        else:
-                            # YBN: extract via YSTB
-                            if reader:
-                                entry = reader.find_entry(f['path'])
-                                if not entry:
-                                    continue
-                                data = reader.extract(entry)
-                                ystb = YSTBFile.from_bytes(data, key=key)
-                            else:
-                                ystb = YSTBFile.from_file(f['path'], key=key)
-                            stem = Path(f['name']).stem
-                            fn(ystb, str(Path(out) / f"{stem}.txt"), enc)
-                            cnt += 1
-                    except Exception:
-                        pass
-                self._ok(f"已导出 {cnt} 个文件")
-        except Exception as e:
-            self._err(str(e))
+        self._start_batch('export_text', out, fmt)
 
     def _decrypt(self):
         r = self._result
@@ -637,71 +632,92 @@ class WorkspacePage(ScrollArea):
         out = QFileDialog.getExistingDirectory(self, "解密输出目录")
         if not out:
             return
-        from core.ystb import YSTBFile
-        key = r.get('key', 0)
-        try:
-            if r['mode'] == 'file':
-                ystb = YSTBFile.from_file(r['path'], key=key)
-                ystb.save(str(Path(out) / Path(r['path']).name), key=0)
-                self._ok("解密完成")
-            elif r['mode'] in ('folder', 'ypf'):
-                cnt = 0
-                reader = r.get('_reader')
-                for f in r['files']:
-                    try:
-                        if reader:
-                            entry = reader.find_entry(f['path'])
-                            if not entry:
-                                continue
-                            data = reader.extract(entry)
-                            ystb = YSTBFile.from_bytes(data, key=key)
-                        else:
-                            ystb = YSTBFile.from_file(f['path'], key=key)
-                        ystb.save(str(Path(out) / f['name']), key=0)
-                        cnt += 1
-                    except Exception:
-                        pass
-                self._ok(f"已解密 {cnt} 个文件")
-        except Exception as e:
-            self._err(str(e))
+        self._start_batch('decrypt', out)
 
     def _export_ypf_all(self):
         r = self._result
         if not r or r['mode'] != 'ypf':
             return
-        reader = r.get('_reader')
-        if not reader:
-            return
         out = QFileDialog.getExistingDirectory(self, "选择导出目录")
         if not out:
             return
-        total = len(reader.entries)
-        # 显示进度条
-        self.progress_bar.setRange(0, total)
+        self._start_batch('extract_archive', out)
+
+    def _start_batch(self, operation: str, output_dir: str,
+                     fmt: str = 'raw'):
+        if ((self._batch_worker and self._batch_worker.isRunning())
+                or (self._worker and self._worker.isRunning())):
+            return
+        r = self._result
+        if not r:
+            return
+        if operation == 'extract_archive':
+            total = r.get('ypf_total', 0)
+        elif r['mode'] == 'file':
+            total = 1
+        elif operation == 'decrypt':
+            total = sum(not item.get('is_txt')
+                        for item in r.get('files', []))
+        else:
+            total = sum(item.get('text_count', 0) > 0
+                        for item in r.get('files', []))
+        self.progress_bar.setRange(0, max(total, 1))
         self.progress_bar.setValue(0)
-        self.progress_label.setText(f"导出中 0/{total} ...")
+        self.progress_label.setText(f"处理中 0/{total} ...")
         self.progress_label.show()
         self.progress_bar.show()
-        cnt = 0
-        from PyQt5.QtWidgets import QApplication
-        try:
-            for i, entry in enumerate(reader.entries):
-                reader.extract_to_file(entry, out)
-                cnt += 1
-                if (i + 1) % 20 == 0 or i + 1 == total:
-                    self.progress_bar.setValue(i + 1)
-                    self.progress_label.setText(
-                        f"导出中 {i+1}/{total}  ({_fmt(entry.data_offset)})")
-                    QApplication.processEvents()
-            self.progress_bar.setValue(total)
-            self.progress_label.setText(f"导出完成: {cnt} 个文件")
-            self._ok(f"已导出 {cnt} 个文件到 {out}")
-            import subprocess, sys
-            if sys.platform == 'win32':
-                subprocess.Popen(['explorer', out.replace('/', '\\')])
-        except Exception as e:
-            self.progress_label.setText(f"导出中断 ({cnt}/{total})")
-            self._err(str(e))
+        self.action_bar.setEnabled(False)
+        self.drop.setEnabled(False)
+        self._batch_worker = BatchOperationWorker(
+            operation, r, output_dir, fmt)
+        self._batch_worker.progress.connect(self._batch_progress)
+        self._batch_worker.resultReady.connect(self._batch_done)
+        self._batch_worker.failed.connect(self._batch_failed)
+        self._batch_worker.finished.connect(self._batch_finished)
+        self._batch_worker.start()
+
+    def _batch_progress(self, current: int, total: int, name: str):
+        self.progress_bar.setRange(0, max(total, 1))
+        self.progress_bar.setValue(current)
+        self.progress_label.setText(
+            f"处理中 {current}/{total} · {Path(name).name}")
+
+    def _batch_done(self, result: dict):
+        self.action_bar.setEnabled(True)
+        count = result['count']
+        errors = result.get('errors', [])
+        self.progress_bar.setValue(self.progress_bar.maximum())
+        self.progress_label.setText(
+            f"处理完成: {count} 个文件，失败 {len(errors)} 个")
+        if errors:
+            preview = '\n'.join(errors[:5])
+            InfoBar.warning(
+                '部分文件处理失败', preview,
+                parent=self.window(), duration=8000,
+                position=InfoBarPosition.TOP)
+        else:
+            self._ok(f"已处理 {count} 个文件 → {result['output_dir']}")
+    def _batch_failed(self, message: str):
+        self.action_bar.setEnabled(True)
+        self.progress_label.setText('处理失败')
+        self._err(message)
+
+    def _batch_finished(self):
+        worker = self._batch_worker
+        self._batch_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self.action_bar.setEnabled(True)
+        if not (self._worker and self._worker.isRunning()):
+            self.drop.setEnabled(True)
+
+    def shutdown(self, timeout_ms: int = 5000) -> bool:
+        workers = [worker for worker in (self._worker, self._batch_worker)
+                   if worker is not None and worker.isRunning()]
+        for worker in workers:
+            worker.requestInterruption()
+        wait_results = [worker.wait(timeout_ms) for worker in workers]
+        return all(wait_results)
 
     def _ok(self, msg):
         InfoBar.success("完成", msg, parent=self.window(),

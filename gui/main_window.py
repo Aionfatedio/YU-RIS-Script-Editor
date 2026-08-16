@@ -1,12 +1,15 @@
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication
+from dataclasses import replace
+
+from PyQt5.QtWidgets import QApplication, QMessageBox
 from qfluentwidgets import (
-    FluentWindow, FluentIcon, NavigationItemPosition,
-    setTheme, Theme
+    FluentIcon,
+    FluentWindow,
+    NavigationItemPosition,
 )
-from .workspace_page import WorkspacePage
+
 from .editor_page import EditorPage
 from .settings_page import SettingsPage
+from .workspace_page import WorkspacePage
 
 
 class MainWindow(FluentWindow):
@@ -30,25 +33,55 @@ class MainWindow(FluentWindow):
             NavigationItemPosition.BOTTOM)
 
         self.navigationInterface.setReturnButtonVisible(False)
-        self.workspace.openInEditor.connect(self._open_in_editor)
+        self.workspace.openDocument.connect(self._open_document)
         self.settings.editorFontChanged.connect(self.editor._apply_theme)
 
         screen = QApplication.primaryScreen()
         if screen:
             g = screen.availableGeometry()
-            self.move((g.width() - self.width()) // 2,
-                      (g.height() - self.height()) // 2)
+            self.move(g.x() + (g.width() - self.width()) // 2,
+                      g.y() + (g.height() - self.height()) // 2)
 
-    def _open_in_editor(self, path: str, key: int, encoding: str,
-                        switch: bool = True):
+    def _open_document(self, request):
+        if not self._confirm_discard_changes():
+            return
         from .settings_page import Settings
         cfg = Settings.load()
-        if cfg.default_encoding != 'auto':
-            encoding = cfg.default_encoding
-        key = key & 0xFFFFFFFF
-        ctx = self.workspace._ypf_save_context
-        self.editor.set_ypf_context(ctx)
-        self.editor.load_file(path, key, encoding)
-
-        if switch:
+        if (cfg.default_encoding != 'auto'
+                and request.target_encoding == 'auto'):
+            request = replace(request, target_encoding=cfg.default_encoding)
+        try:
+            self.editor.open_document(request)
+        except Exception as exc:  # noqa: BLE001 - GUI error boundary
+            QMessageBox.critical(self, '打开文档失败', str(exc))
+            return
+        if request.switch_to_editor:
             self.switchTo(self.editor)
+
+    def _confirm_discard_changes(self) -> bool:
+        if not self.editor.is_modified:
+            return True
+        answer = QMessageBox.question(
+            self, '未保存修改', '当前文档有未保存修改，是否先保存？',
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save)
+        if answer == QMessageBox.Cancel:
+            return False
+        if answer == QMessageBox.Save:
+            if self.editor.can_save:
+                self.editor._save()
+            else:
+                self.editor._save_as()
+            return not self.editor.is_modified
+        return True
+
+    def closeEvent(self, event):
+        if not self._confirm_discard_changes():
+            event.ignore()
+            return
+        if not self.workspace.shutdown():
+            QMessageBox.information(
+                self, '后台任务仍在结束', '请稍后再次关闭窗口。')
+            event.ignore()
+            return
+        event.accept()

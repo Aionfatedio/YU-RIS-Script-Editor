@@ -1,42 +1,94 @@
 import json
+import os
+import tempfile
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from dataclasses import dataclass, asdict
 
-from PyQt5.QtCore import Qt, pyqtSignal, QUrl
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy
-)
-from PyQt5.QtGui import QFontDatabase, QFont, QDesktopServices
+from PyQt5.QtCore import Qt, QUrl, pyqtSignal
+from PyQt5.QtGui import QDesktopServices, QFont, QFontDatabase
+from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, StrongBodyLabel, SubtitleLabel,
-    SwitchButton, ComboBox, CardWidget, ScrollArea,
-    PushButton, PrimaryPushButton, FluentIcon, HyperlinkLabel,
-    SpinBox, Slider, SearchLineEdit,
-    Flyout, FlyoutViewBase
+    BodyLabel,
+    CaptionLabel,
+    CardWidget,
+    ComboBox,
+    FluentIcon,
+    Flyout,
+    FlyoutViewBase,
+    HyperlinkLabel,
+    PrimaryPushButton,
+    PushButton,
+    ScrollArea,
+    SearchLineEdit,
+    Slider,
+    StrongBodyLabel,
+    SwitchButton,
+    isDarkTheme,
 )
 
-_CFG_PATH = Path(__file__).resolve().parent.parent / 'config.json'
+from core.encoding import Encoding, normalize_encoding
+
+from .theme import theme_colors
+
+
+def _config_path() -> Path:
+    if os.name == 'nt':
+        root = Path(os.environ.get('APPDATA', Path.home() / 'AppData/Roaming'))
+    else:
+        root = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
+    return root / 'YU-RIS-Script-Editor' / 'config.json'
 
 
 @dataclass
 class Settings:
     auto_backup: bool = True
-    default_encoding: str = 'auto'   
-    editor_font_family: str = ''     
-    editor_font_size: int = 14       
+    default_encoding: str = 'auto'
+    editor_font_family: str = ''
+    editor_font_size: int = 14
+
+    def _validate(self):
+        self.auto_backup = bool(self.auto_backup)
+        value = str(self.default_encoding or 'auto').strip().lower()
+        if value != 'auto':
+            value = normalize_encoding(value, default='')
+        self.default_encoding = (
+            value if value in Encoding.SUPPORTED else 'auto')
+        self.editor_font_family = str(self.editor_font_family or '')
+        self.editor_font_size = max(8, min(72, int(self.editor_font_size)))
+
     def save(self):
-        _CFG_PATH.write_text(
-            json.dumps(asdict(self), ensure_ascii=False, indent=2),
-            encoding='utf-8')
+        self._validate()
+        target = _config_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix='.config.', suffix='.tmp', dir=str(target.parent))
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as stream:
+                json.dump(asdict(self), stream, ensure_ascii=False, indent=2)
+                stream.write('\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, target)
+        finally:
+            temp.unlink(missing_ok=True)
 
     @classmethod
     def load(cls) -> 'Settings':
-        if _CFG_PATH.exists():
+        target = _config_path()
+        legacy = Path(__file__).resolve().parent.parent / 'config.json'
+        source = target if target.exists() else legacy
+        if source.exists():
             try:
-                d = json.loads(_CFG_PATH.read_text(encoding='utf-8'))
-                return cls(**{k: v for k, v in d.items()
-                              if k in cls.__dataclass_fields__})
-            except Exception:
+                raw = json.loads(source.read_text(encoding='utf-8'))
+                if isinstance(raw, dict):
+                    settings = cls(**{
+                        key: value for key, value in raw.items()
+                        if key in cls.__dataclass_fields__
+                    })
+                    settings._validate()
+                    return settings
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 pass
         return cls()
 
@@ -77,8 +129,8 @@ class SettingsPage(ScrollArea):
         cl2 = QHBoxLayout(card2)
         cl2.setContentsMargins(20, 14, 20, 14)
         lbl2 = QVBoxLayout()
-        lbl2.addWidget(BodyLabel("默认编码"))
-        lbl2.addWidget(CaptionLabel("解密和封包时的编码"))
+        lbl2.addWidget(BodyLabel("默认写入编码"))
+        lbl2.addWidget(CaptionLabel("读取编码自动检测；此项控制保存时的目标编码"))
         cl2.addLayout(lbl2, 1)
         self.enc_combo = ComboBox()
         self.enc_combo.addItems(["自动", "SHIFT_JIS", "GBK", "UTF-8", "BIG5"])
@@ -97,7 +149,8 @@ class SettingsPage(ScrollArea):
         lblf.addWidget(CaptionLabel("修改编辑器字体"))
         clf.addLayout(lblf, 1)
         self.font_label = CaptionLabel(self._font_display_text())
-        self.font_label.setStyleSheet("color: rgba(255,255,255,0.6);")
+        self.font_label.setStyleSheet(
+            f"color: {theme_colors(isDarkTheme()).muted};")
         clf.addWidget(self.font_label)
         self.btn_font = PushButton(FluentIcon.FONT, "选择字体")
         self.btn_font.setMaximumWidth(120)
@@ -116,10 +169,12 @@ class SettingsPage(ScrollArea):
         cl3 = QVBoxLayout(card3)
         cl3.setContentsMargins(20, 14, 20, 14)
         cl3.setSpacing(6)
-        cl3.addWidget(BodyLabel("YU-RIS Script Editor V1.0.0"))
-        link_repo = HyperlinkLabel("项目地址", "https://github.com/Aionfatedio/YU-RIS-Script-Editor")
+        cl3.addWidget(BodyLabel("YU-RIS Script Editor [V1.1.0]"))
+        cl3.addWidget(CaptionLabel("使用方法：加载脚本文件，双击列表项进行编辑"))
+        repo_url = "https://github.com/Aionfatedio/YU-RIS-Script-Editor"
+        link_repo = HyperlinkLabel("项目地址", repo_url)
         link_repo.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl("https://github.com/Aionfatedio/YU-RIS-Script-Editor")))
+            lambda: QDesktopServices.openUrl(QUrl(repo_url)))
         cl3.addWidget(link_repo)
         cl3.addWidget(BodyLabel("感谢以下项目提供的工具和思路"))
         thanks_row = QHBoxLayout()
@@ -204,9 +259,10 @@ class SettingsPage(ScrollArea):
                     "HelloWorld 君の名前は？ 1234567890")
                 self._preview.setAlignment(Qt.AlignCenter)
                 self._preview.setMinimumHeight(44)
+                colors = theme_colors(isDarkTheme())
                 self._preview.setStyleSheet(
-                    "BodyLabel{padding:10px;color:white;"
-                    "border:1px solid #555;border-radius:6px}")
+                    f"BodyLabel{{padding:10px;color:{colors.primary};"
+                    f"border:1px solid {colors.border};border-radius:6px}}")
                 vl.addWidget(self._preview)
 
                 btn_row = QHBoxLayout()

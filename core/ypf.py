@@ -1,9 +1,28 @@
+import os
 import struct
 import zlib
-from pathlib import Path
-from typing import Optional
+from pathlib import Path, PurePosixPath
 
 HEADER_SIZE = 0x20
+
+
+def normalize_archive_path(path: str) -> PurePosixPath:
+    normalized = path.replace('\\', '/')
+    pure = PurePosixPath(normalized)
+    if (pure.is_absolute() or not pure.parts
+            or any(part in ('', '.', '..') for part in pure.parts)
+            or any(':' in part or '\x00' in part for part in pure.parts)):
+        raise ValueError(f"YPF 条目路径不安全: {path}")
+    return pure
+
+
+def safe_output_path(output_dir: str | Path, entry_path: str) -> Path:
+    base = Path(output_dir).resolve()
+    relative = normalize_archive_path(entry_path)
+    output = base.joinpath(*relative.parts).resolve()
+    if os.path.commonpath((str(base), str(output))) != str(base):
+        raise ValueError(f"YPF 条目越过输出目录: {entry_path}")
+    return output
 
 _SWAP_TABLE_00 = bytes([
     0x03, 0x48, 0x06, 0x35,
@@ -61,17 +80,17 @@ def _validate_meta(index_data: bytes, meta_pos: int, extra_size: int,
         return False
     if ic > 1:
         return False
-    if ds == 0 or ds > 0x40000000:
+    if ds > 0x40000000:
         return False
-    if cs == 0 or cs > file_size:
+    if cs > file_size:
         return False
-    if do < data_start or do >= file_size:
+    if do < data_start or do > file_size:
+        return False
+    if cs > file_size - do:
         return False
     if not ic and cs != ds:
         return False
-    if ic and cs > ds:
-        return False
-    return True
+    return not (ic and cs == 0)
 
 
 def _try_decode_name(raw_bytes: bytearray, name_key: int) -> bool:
@@ -90,9 +109,18 @@ def _try_decode_name(raw_bytes: bytearray, name_key: int) -> bool:
 
 
 class YPFEntry:
-    __slots__ = ('crc', 'path', 'file_type', 'is_compressed',
-                 'decomp_size', 'comp_size', 'data_offset', 'data_crc',
-                 '_meta_file_offset')
+    __slots__ = (
+        '_compression_wbits',
+        '_meta_file_offset',
+        'comp_size',
+        'crc',
+        'data_crc',
+        'data_offset',
+        'decomp_size',
+        'file_type',
+        'is_compressed',
+        'path',
+    )
 
     def __init__(self):
         self.crc: int = 0
@@ -104,6 +132,7 @@ class YPFEntry:
         self.data_offset: int = 0
         self.data_crc: int = 0
         self._meta_file_offset: int = 0
+        self._compression_wbits: int | None = None
 
     @property
     def size(self) -> int:
@@ -122,6 +151,8 @@ class YPFReader:
         with open(self.filepath, 'rb') as f:
             header = f.read(HEADER_SIZE)
 
+        if len(header) != HEADER_SIZE:
+            raise ValueError(f"YPF 文件头不完整: {self.filepath}")
         if header[:4] != b'YPF\x00':
             raise ValueError(f"非有效YPF文件: {self.filepath}")
 
@@ -130,6 +161,8 @@ class YPFReader:
         dir_size = struct.unpack_from('<I', header, 12)[0]
         file_size = self.filepath.stat().st_size
         data_start = HEADER_SIZE + dir_size
+        if data_start > file_size:
+            raise ValueError("YPF 索引大小超出文件范围")
 
         swap_table = _select_swap_table(self.version)
         extra_size = 0x12 + _extra_header_size(self.version)
@@ -141,9 +174,9 @@ class YPFReader:
         pos = 0
         name_key = -1
 
-        for _ in range(self.entry_count):
+        for entry_index in range(self.entry_count):
             if pos + 5 + extra_size > len(index_data):
-                break
+                raise ValueError(f"YPF 索引条目 {entry_index} 不完整")
 
             crc = struct.unpack_from('<I', index_data, pos)[0]
             pos += 4
@@ -162,7 +195,9 @@ class YPFReader:
 
             if not valid:
                 found = False
-                for try_len in range(1, min(256, len(index_data) - name_start - extra_size)):
+                max_name_size = min(
+                    256, len(index_data) - name_start - extra_size)
+                for try_len in range(1, max_name_size):
                     if try_len == name_size:
                         continue
                     meta_pos = name_start + try_len
@@ -181,8 +216,10 @@ class YPFReader:
                         break
                 if not found:
                     name_size = _decrypt_length(swap_table, raw_len_byte)
-                    if name_size == 0 or name_start + name_size + extra_size > len(index_data):
-                        break
+                    name_end = name_start + name_size + extra_size
+                    if name_size == 0 or name_end > len(index_data):
+                        raise ValueError(
+                            f"YPF 条目 {entry_index} 文件名长度异常")
 
             raw_name = bytearray(index_data[name_start:name_start + name_size])
             pos = name_start + name_size
@@ -214,6 +251,10 @@ class YPFReader:
 
             self.entries.append(entry)
 
+        if len(self.entries) != self.entry_count:
+            raise ValueError(
+                f"YPF 索引数量不一致: {len(self.entries)} != {self.entry_count}")
+
     def list_folders(self) -> dict[str, int]:
         from collections import Counter
         folders = Counter()
@@ -234,15 +275,25 @@ class YPFReader:
         with open(self.filepath, 'rb') as f:
             f.seek(entry.data_offset)
             raw = f.read(entry.comp_size)
+        if len(raw) != entry.comp_size:
+            raise ValueError(f"YPF 条目数据不完整: {entry.path}")
         if entry.is_compressed:
             try:
-                return zlib.decompress(raw)
+                data = zlib.decompress(raw)
+                entry._compression_wbits = zlib.MAX_WBITS
             except zlib.error:
-                return zlib.decompress(raw, -15)
-        return raw
+                data = zlib.decompress(raw, -zlib.MAX_WBITS)
+                entry._compression_wbits = -zlib.MAX_WBITS
+        else:
+            data = raw
+        if len(data) != entry.decomp_size:
+            raise ValueError(
+                f"YPF 条目解压大小异常: {entry.path} "
+                f"({len(data)} != {entry.decomp_size})")
+        return data
 
     def extract_to_file(self, entry: YPFEntry, output_dir: str) -> Path:
-        out = Path(output_dir) / entry.path.replace('\\', '/')
+        out = safe_output_path(output_dir, entry.path)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(self.extract(entry))
         return out
@@ -258,7 +309,7 @@ class YPFReader:
                 callback(i + 1, len(entries), entry.path)
         return results
 
-    def find_entry(self, path: str) -> Optional[YPFEntry]:
+    def find_entry(self, path: str) -> YPFEntry | None:
         n = path.replace('\\', '/')
         for e in self.entries:
             if e.path.replace('\\', '/') == n:
@@ -267,12 +318,27 @@ class YPFReader:
 
     def update_entry(self, entry: YPFEntry, new_data: bytes):
         if entry.is_compressed:
-            new_comp = zlib.compress(new_data, 9)
+            wbits = entry._compression_wbits
+            if wbits is None:
+                # Preserve the framing used by the original entry.
+                with open(self.filepath, 'rb') as f:
+                    f.seek(entry.data_offset)
+                    old_raw = f.read(entry.comp_size)
+                try:
+                    zlib.decompress(old_raw)
+                    wbits = zlib.MAX_WBITS
+                except zlib.error:
+                    zlib.decompress(old_raw, -zlib.MAX_WBITS)
+                    wbits = -zlib.MAX_WBITS
+            compressor = zlib.compressobj(level=9, wbits=wbits)
+            new_comp = compressor.compress(new_data) + compressor.flush()
+            entry._compression_wbits = wbits
         else:
             new_comp = new_data
 
         new_decomp = len(new_data)
         new_comp_sz = len(new_comp)
+        new_crc = zlib.crc32(new_data) & 0xFFFFFFFF
 
         with open(self.filepath, 'r+b') as f:
             if new_comp_sz <= entry.comp_size:
@@ -291,6 +357,17 @@ class YPFReader:
             f.seek(entry._meta_file_offset + 2)
             f.write(struct.pack('<I', new_decomp))
             f.write(struct.pack('<I', new_comp_sz))
+            f.seek(entry._meta_file_offset + 14)
+            f.write(struct.pack('<I', new_crc))
 
         entry.decomp_size = new_decomp
         entry.comp_size = new_comp_sz
+        entry.data_crc = new_crc
+
+    def verify_entry(self, entry: YPFEntry, expected: bytes | None = None) -> bool:
+        data = self.extract(entry)
+        if expected is not None and data != expected:
+            return False
+        if entry.data_crc:
+            return (zlib.crc32(data) & 0xFFFFFFFF) == entry.data_crc
+        return True

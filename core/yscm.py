@@ -1,6 +1,5 @@
 import struct
 from pathlib import Path
-from typing import Optional
 
 
 class YSCMArg:
@@ -13,7 +12,7 @@ class YSCMArg:
 
 
 class YSCMCommand:
-    __slots__ = ('opcode', 'name', 'args')
+    __slots__ = ('args', 'name', 'opcode')
 
     def __init__(self, opcode: int, name: str):
         self.opcode = opcode
@@ -41,22 +40,43 @@ class YSCMFile:
         obj = cls()
         obj.version = struct.unpack_from('<I', data, 4)[0]
         command_count = struct.unpack_from('<I', data, 8)[0]
+        if command_count > len(data):
+            raise ValueError("YSCM 命令数量异常")
 
         pos = 16  
         for opcode in range(command_count):
-            name_end = data.index(b'\x00', pos)
-            name = data[pos:name_end].decode('ascii')
+            if pos >= len(data):
+                raise ValueError(f"YSCM 命令 {opcode} 超出文件范围")
+            name_end = data.find(b'\x00', pos)
+            if name_end < 0:
+                raise ValueError(f"YSCM 命令 {opcode} 名称未终止")
+            try:
+                name = data[pos:name_end].decode('ascii')
+            except UnicodeDecodeError as exc:
+                raise ValueError(f"YSCM 命令 {opcode} 名称编码异常") from exc
             pos = name_end + 1
 
             cmd = YSCMCommand(opcode, name)
 
+            if pos >= len(data):
+                raise ValueError(f"YSCM 命令 {opcode} 缺少参数数量")
             arg_count = data[pos]
             pos += 1
 
-            for _ in range(arg_count):
-                arg_name_end = data.index(b'\x00', pos)
-                arg_name = data[pos:arg_name_end].decode('ascii')
+            for arg_index in range(arg_count):
+                arg_name_end = data.find(b'\x00', pos)
+                if arg_name_end < 0:
+                    raise ValueError(
+                        f"YSCM 命令 {opcode} 参数 {arg_index} 名称未终止")
+                try:
+                    arg_name = data[pos:arg_name_end].decode('ascii')
+                except UnicodeDecodeError as exc:
+                    raise ValueError(
+                        f"YSCM 命令 {opcode} 参数名称编码异常") from exc
                 pos = arg_name_end + 1
+                if pos + 2 > len(data):
+                    raise ValueError(
+                        f"YSCM 命令 {opcode} 参数 {arg_index} 数据不完整")
                 v0 = data[pos]
                 v1 = data[pos + 1]
                 pos += 2
@@ -66,17 +86,17 @@ class YSCMFile:
 
         return obj
 
-    def get_opcode(self, command_name: str) -> Optional[int]:
+    def get_opcode(self, command_name: str) -> int | None:
         for cmd in self.commands:
             if cmd.name == command_name:
                 return cmd.opcode
         return None
 
-    def get_command(self, opcode: int) -> Optional[YSCMCommand]:
+    def get_command(self, opcode: int) -> YSCMCommand | None:
         if 0 <= opcode < len(self.commands):
             return self.commands[opcode]
         return None
 
     @property
-    def word_opcode(self) -> Optional[int]:
+    def word_opcode(self) -> int | None:
         return self.get_opcode("WORD")

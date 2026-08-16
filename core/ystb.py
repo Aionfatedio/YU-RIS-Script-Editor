@@ -1,7 +1,8 @@
 import struct
+from collections import Counter
 from pathlib import Path
-from typing import Optional
-from .encoding import xor_block, Encoding
+
+from .encoding import Encoding, detect_text_encoding, xor_block
 
 HEADER_SIZE = 0x20
 MAGIC = b'YSTB'
@@ -9,7 +10,7 @@ ARGS_ENTRY_SIZE = 12
 
 
 class TextEntry:
-    __slots__ = ('args_offset', 'text', 'is_option', 'raw_data')
+    __slots__ = ('args_offset', 'is_option', 'raw_data', 'text')
 
     def __init__(self, args_offset: int, text: str, is_option: bool = False,
                  raw_data: bytes = b''):
@@ -39,6 +40,7 @@ class YSTBFile:
         self.v2_args_seg_offset: int = 0
 
         self._append_region: bytearray = bytearray()
+        self.trailing_data: bytes = b''
 
     @classmethod
     def from_file(cls, filepath: str, key: int = 0) -> 'YSTBFile':
@@ -56,6 +58,21 @@ class YSTBFile:
         obj._header_raw = bytearray(data[:HEADER_SIZE])
         obj.version = struct.unpack_from('<I', data, 4)[0]
         obj.is_v2 = 200 < obj.version < 300
+
+        if obj.is_v2:
+            sizes = [
+                struct.unpack_from('<I', data, 0x08)[0],
+                struct.unpack_from('<I', data, 0x0C)[0],
+            ]
+        else:
+            sizes = [
+                struct.unpack_from('<I', data, 0x0C)[0],
+                struct.unpack_from('<I', data, 0x10)[0],
+                struct.unpack_from('<I', data, 0x14)[0],
+                struct.unpack_from('<I', data, 0x18)[0],
+            ]
+        if HEADER_SIZE + sum(sizes) > len(data):
+            raise ValueError("YSTB 段大小超出文件范围")
 
         if key:
             data = obj._decrypt(data, key)
@@ -92,6 +109,8 @@ class YSTBFile:
                 result.extend(xor_block(seg, key_bytes))
                 offset += seg_size
 
+        result.extend(data[offset:])
+
         return bytes(result)
 
     def _encrypt(self, data: bytes, key: int) -> bytes:
@@ -115,6 +134,8 @@ class YSTBFile:
         offset += args_data_size
 
         self.line_numbers = data[offset:offset + line_num_size]
+        offset += line_num_size
+        self.trailing_data = data[offset:]
 
     def _parse_v2(self, data: bytes):
         code_seg_size = struct.unpack_from('<I', data, 0x08)[0]
@@ -126,6 +147,8 @@ class YSTBFile:
         offset += code_seg_size
 
         self.args_segment = data[offset:offset + args_seg_size]
+        offset += args_seg_size
+        self.trailing_data = data[offset:]
 
     @staticmethod
     def guess_key(filepath: str) -> int:
@@ -139,48 +162,130 @@ class YSTBFile:
         version = struct.unpack_from('<I', data, 4)[0]
 
         if 200 < version < 300:
-            code_seg_size = struct.unpack_from('<I', data, 0x08)[0]
-            args_seg_size = struct.unpack_from('<I', data, 0x0C)[0]
-            if code_seg_size + args_seg_size < 0x10:
-                return 0
-            pos = 0x2C
-            if pos + 4 > len(data):
-                return 0
-            return struct.unpack_from('<I', data, pos)[0]
+            return YSTBFile._guess_v2_key(data)
+        return YSTBFile._guess_v5_key(data)
 
-        args_data_size = struct.unpack_from('<I', data, 0x14)[0]
-        if args_data_size == 0:
-            return 0
+    @staticmethod
+    def _guess_v5_key(data: bytes) -> int:
         inst_idx_size = struct.unpack_from('<I', data, 0x0C)[0]
         args_idx_size = struct.unpack_from('<I', data, 0x10)[0]
+        args_data_size = struct.unpack_from('<I', data, 0x14)[0]
         args_start = HEADER_SIZE + inst_idx_size
-        num_entries = args_idx_size // ARGS_ENTRY_SIZE
-        if num_entries == 0:
+        if (args_idx_size == 0 or args_idx_size % ARGS_ENTRY_SIZE
+                or args_start + args_idx_size > len(data)):
             return 0
 
-        from collections import Counter
-        candidates = Counter()
-        scan_count = min(num_entries, 200)
-        for i in range(scan_count):
-            pos = args_start + i * ARGS_ENTRY_SIZE + 8  
-            if pos + 4 > len(data):
+        evidence: Counter[int] = Counter()
+        for base in range(args_start, args_start + args_idx_size,
+                          ARGS_ENTRY_SIZE):
+            # Text entries use arg_id=0 and arg_type=0. Their encrypted first
+            # dword therefore is the XOR key itself, so each entry can validate
+            # its own candidate against the encrypted size and data offset.
+            key = struct.unpack_from('<I', data, base)[0]
+            size = struct.unpack_from('<I', data, base + 4)[0] ^ key
+            offset = struct.unpack_from('<I', data, base + 8)[0] ^ key
+            if (0 < size <= 4096 and offset <= args_data_size
+                    and size <= args_data_size - offset):
+                evidence[key] += 1
+
+        return evidence.most_common(1)[0][0] if evidence else 0
+
+    @staticmethod
+    def _guess_v2_key(data: bytes) -> int:
+        code_size = struct.unpack_from('<I', data, 0x08)[0]
+        args_size = struct.unpack_from('<I', data, 0x0C)[0]
+        if HEADER_SIZE + code_size + args_size > len(data) or code_size < 2:
+            return 0
+        encrypted_code = data[HEADER_SIZE:HEADER_SIZE + code_size]
+        candidates = {0}
+        for pos in range(0, min(len(encrypted_code) - 3, 0x100), 4):
+            candidates.add(struct.unpack_from('<I', encrypted_code, pos)[0])
+        if len(data) >= 0x30:
+            candidates.add(struct.unpack_from('<I', data, 0x2C)[0])
+        ranked = sorted((YSTBFile._score_v2_key(
+                            encrypted_code, args_size, key), key)
+                        for key in candidates)
+        best_score, best_key = ranked[-1]
+        zero_score = next(score for score, key in ranked if key == 0)
+        if zero_score >= best_score - 0.5:
+            return 0
+        return best_key if best_score > 0 else 0
+
+    @staticmethod
+    def _score_v2_key(encrypted_code: bytes, args_size: int,
+                      key: int) -> float:
+        code = xor_block(encrypted_code, struct.pack('<I', key))
+        pos = 0
+        blocks = 0
+        structure_score = 0.0
+        empty_blocks = 0
+        while pos + 2 <= len(code) and blocks < 128:
+            op = code[pos]
+            argc = code[pos + 1]
+            if op == 0x38:
+                block_size = 0xA
+            else:
+                block_size = argc * 12 + 6
+            if block_size < 6 or pos + block_size > len(code):
                 break
-            val = struct.unpack_from('<I', data, pos)[0]
-            candidates[val] += 1
 
-        if not candidates:
-            return 0
-        return candidates.most_common(1)[0][0]
+            if op == 0 and argc == 0:
+                empty_blocks += 1
+            if code[pos + 2:pos + 6] == b'\x00' * 4:
+                structure_score += 0.05
 
-    def _read_args_data(self, size: int, offset: int) -> Optional[bytes]:
+            if op != 0x38:
+                for arg_index in range(argc):
+                    arg_pos = pos + 6 + arg_index * ARGS_ENTRY_SIZE
+                    arg_id, arg_type, size, offset = struct.unpack_from(
+                        '<HHII', code, arg_pos)
+                    structure_score += 0.15 if arg_id <= 0x1000 else -1.0
+                    structure_score += 0.25 if arg_type <= 0x40 else -1.5
+                    in_range = (offset <= args_size
+                                and size <= args_size - offset)
+                    if op == 0x54:
+                        structure_score += (
+                            4.0 if 0 < size <= 4096 and in_range else -6.0)
+                    elif size == 0 or in_range:
+                        structure_score += 0.15
+                    else:
+                        structure_score -= 0.5
+            pos += block_size
+            blocks += 1
+        coverage = pos / len(code) if code else 0.0
+        return (coverage * 10.0 + blocks * 0.02 + structure_score
+                - empty_blocks * 0.15)
+
+    def _read_args_data(self, size: int, offset: int) -> bytes | None:
         total_data = self.args_data + bytes(self._append_region)
         if offset + size > len(total_data):
             return None
         return total_data[offset:offset + size]
 
-    def detect_text_encoding(self) -> str:
+    def detect_text_encoding(self, preferred: str | None = Encoding.SJIS) -> str:
         samples = []
-        if not self.is_v2:
+        if self.is_v2:
+            code = self.code_segment
+            pos = 0
+            while pos + 2 <= len(code) and len(samples) < 30:
+                op = code[pos]
+                argc = code[pos + 1]
+                block_size = 0xA if op == 0x38 else argc * 12 + 6
+                if block_size < 6 or pos + block_size > len(code):
+                    break
+                if op == 0x54 and argc >= 1:
+                    entry_offset = pos + 6
+                    if entry_offset + 12 <= len(code):
+                        size = struct.unpack_from(
+                            '<I', code, entry_offset + 4)[0]
+                        offset = struct.unpack_from(
+                            '<I', code, entry_offset + 8)[0]
+                        if (0 < size <= 4096 and offset <= len(self.args_segment)
+                                and size <= len(self.args_segment) - offset):
+                            samples.append(
+                                self.args_segment[offset:offset + size])
+                pos += block_size
+        else:
             args_count = len(self.args_index) // ARGS_ENTRY_SIZE
             for i in range(args_count):
                 base = i * ARGS_ENTRY_SIZE
@@ -191,7 +296,7 @@ class YSTBFile:
                 if arg_id == 0 and arg_type == 0 and 0 < size <= 4096:
                     data = self._read_args_data(size, offset)
                     if data and data[0] != 0x4D and data[:2] != b'H\x03' \
-                            and b'\x00' not in data and b'cg' not in data:
+                            and b'\x00' not in data and not data.startswith(b'cg'):
                         clean = data.replace(Encoding.RUBY_MARKER, b'')
                         if clean:
                             samples.append(clean)
@@ -199,39 +304,9 @@ class YSTBFile:
                     break
 
         if not samples:
-            return 'shift_jis'
+            return preferred or Encoding.SJIS
 
-        blob = b''.join(samples)
-
-        try:
-            blob.decode('utf-8', errors='strict')
-            if any(b > 0x7F for b in blob):
-                return 'utf-8'
-        except UnicodeDecodeError:
-            pass
-
-        sjis_text, gbk_text = None, None
-        try:
-            sjis_text = blob.decode('shift_jis', errors='strict')
-        except UnicodeDecodeError:
-            pass
-        try:
-            gbk_text = blob.decode('gbk', errors='strict')
-        except UnicodeDecodeError:
-            pass
-
-        if sjis_text is not None and gbk_text is None:
-            return 'shift_jis'
-        if gbk_text is not None and sjis_text is None:
-            return 'gbk'
-
-        if sjis_text is not None:
-            has_kana = any('\u3040' <= c <= '\u30FF' for c in sjis_text)
-            if has_kana:
-                return 'shift_jis'
-            return 'gbk'
-
-        return 'shift_jis'
+        return detect_text_encoding(b'\n'.join(samples), preferred=preferred)
 
     def extract_texts(self, encoding: str = 'shift_jis') -> list[TextEntry]:
         if self.is_v2:
@@ -265,10 +340,10 @@ class YSTBFile:
                     inner = data[4:-1] if len(data) > 5 else b''
                     if inner:
                         try:
-                            text = inner.decode(encoding, errors='replace')
+                            text = inner.decode(encoding)
                             texts.append(TextEntry(base, text, is_option=True,
                                                    raw_data=data))
-                        except Exception:
+                        except UnicodeDecodeError:
                             pass
                     else:
                         opt_flag = False
@@ -282,7 +357,7 @@ class YSTBFile:
 
             if arg_id == 0 and arg_type == 0:
                 if (data[0] == 0x4D or data[:2] == b'H\x03'
-                        or b'\x00' in data or b'cg' in data):
+                        or b'\x00' in data or data.startswith(b'cg')):
                     continue
 
                 clean_data = data.replace(Encoding.RUBY_MARKER, b'')
@@ -290,11 +365,7 @@ class YSTBFile:
                     text = clean_data.decode(encoding)
                     texts.append(TextEntry(base, text, raw_data=data))
                 except UnicodeDecodeError:
-                    try:
-                        text = clean_data.decode(encoding, errors='replace')
-                        texts.append(TextEntry(base, text, raw_data=data))
-                    except Exception:
-                        pass
+                    pass
 
         return texts
 
@@ -305,27 +376,35 @@ class YSTBFile:
         pos = 0
 
         while pos < len(code):
+            if pos + 2 > len(code):
+                break
             op = code[pos]
-            argc = code[pos + 1] if pos + 1 < len(code) else 0
+            argc = code[pos + 1]
 
             if op == 0x38:
+                if pos + 0xA > len(code):
+                    break
                 pos += 0xA
                 continue
 
             block_size = argc * 12 + 6
+            if block_size < 6 or pos + block_size > len(code):
+                break
 
             if op == 0x54 and argc >= 1:
                 entry_offset = pos + 6
+                if entry_offset + 12 > len(code):
+                    break
                 arg_size = struct.unpack_from('<I', code, entry_offset + 4)[0]
                 arg_rva = struct.unpack_from('<I', code, entry_offset + 8)[0]
 
                 if arg_rva + arg_size <= len(res):
                     data = res[arg_rva:arg_rva + arg_size]
                     try:
-                        text = data.decode(encoding, errors='replace')
+                        text = data.decode(encoding)
                         texts.append(TextEntry(entry_offset, text,
                                                raw_data=data))
-                    except Exception:
+                    except UnicodeDecodeError:
                         pass
 
             pos += block_size
@@ -341,7 +420,8 @@ class YSTBFile:
             self._insert_option(args_offset, text, target_encoding)
             return
 
-        data_offset = len(self.args_data) + len(self._append_region)
+        base_size = len(self.args_segment) if self.is_v2 else len(self.args_data)
+        data_offset = base_size + len(self._append_region)
         encoded = encode_text_for_game(text, target_encoding)
         data_len = len(encoded)
 
@@ -363,7 +443,8 @@ class YSTBFile:
                        target_encoding: str):
         from .encoding import encode_text_for_game
 
-        data_offset = len(self.args_data) + len(self._append_region)
+        base_size = len(self.args_segment) if self.is_v2 else len(self.args_data)
+        data_offset = base_size + len(self._append_region)
         encoded = encode_text_for_game(text, target_encoding)
         wrapped = (b'\x4D'
                    + struct.pack('<H', len(encoded) + 2)
@@ -391,19 +472,21 @@ class YSTBFile:
             new_args_size = len(self.args_segment) + len(self._append_region)
             struct.pack_into('<I', header, 0x0C, new_args_size)
             return bytes(header + self.code_segment
-                         + self.args_segment + self._append_region)
+                         + self.args_segment + self._append_region
+                         + self.trailing_data)
         else:
             new_args_data_size = len(self.args_data) + len(self._append_region)
             struct.pack_into('<I', header, 0x14, new_args_data_size)
             return bytes(header + self.inst_index + self.args_index
                          + self.args_data + self._append_region
-                         + self.line_numbers)
+                         + self.line_numbers + self.trailing_data)
+
+    def to_bytes(self, key: int = 0) -> bytes:
+        data = self.build()
+        return self._encrypt(data, key) if key else data
 
     def save(self, filepath: str, key: int = 0):
-        data = self.build()
-        if key:
-            data = self._encrypt(data, key)
-        Path(filepath).write_bytes(data)
+        Path(filepath).write_bytes(self.to_bytes(key))
 
     def reset_append(self):
         self._append_region = bytearray()

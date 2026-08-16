@@ -1,0 +1,2 @@
+PyQt5>=5.15.10,<6
+PyQt-Fluent-Widgets>=1.7,<2

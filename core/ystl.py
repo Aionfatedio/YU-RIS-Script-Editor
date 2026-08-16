@@ -1,11 +1,15 @@
 import struct
 from pathlib import Path
-from typing import Optional
 
 
 class YSTLEntry:
-    __slots__ = ('sequence', 'path', 'text_count', 'variable_count',
-                 'label_count')
+    __slots__ = (
+        'label_count',
+        'path',
+        'sequence',
+        'text_count',
+        'variable_count',
+    )
 
     def __init__(self):
         self.sequence: int = 0
@@ -44,29 +48,40 @@ class YSTLFile:
         obj = cls()
         obj.version = struct.unpack_from('<I', data, 4)[0]
         entry_count = struct.unpack_from('<I', data, 8)[0]
+        if entry_count > len(data) // 8:
+            raise ValueError("YSTL 条目数量异常")
         obj.is_v5 = obj.version >= 300
 
         pos = 12
-        for _ in range(entry_count):
+        for index in range(entry_count):
+            if pos + 8 > len(data):
+                raise ValueError(f"YSTL 条目 {index} 头部不完整")
             entry = YSTLEntry()
             entry.sequence = struct.unpack_from('<I', data, pos)[0]
             path_size = struct.unpack_from('<I', data, pos + 4)[0]
             pos += 8
 
+            if path_size > len(data) - pos:
+                raise ValueError(f"YSTL 条目 {index} 路径超出文件范围")
             path_bytes = data[pos:pos + path_size]
             try:
                 entry.path = path_bytes.decode('shift_jis').replace('\\', '/')
             except UnicodeDecodeError:
-                entry.path = path_bytes.decode('shift_jis', errors='replace').replace('\\', '/')
+                entry.path = path_bytes.decode(
+                    'shift_jis', errors='replace').replace('\\', '/')
             pos += path_size
 
             if obj.is_v5:
+                if pos + 20 > len(data):
+                    raise ValueError(f"YSTL 条目 {index} 元数据不完整")
                 pos += 8  
                 entry.variable_count = struct.unpack_from('<I', data, pos)[0]
                 entry.label_count = struct.unpack_from('<I', data, pos + 4)[0]
                 entry.text_count = struct.unpack_from('<I', data, pos + 8)[0]
                 pos += 12
             else:
+                if pos + 16 > len(data):
+                    raise ValueError(f"YSTL 条目 {index} 元数据不完整")
                 pos += 16
 
             obj.entries.append(entry)
@@ -78,13 +93,13 @@ class YSTLFile:
             return [e for e in self.entries if e.text_count > 0]
         return list(self.entries)
 
-    def get_path(self, sequence: int) -> Optional[str]:
+    def get_path(self, sequence: int) -> str | None:
         for entry in self.entries:
             if entry.sequence == sequence:
                 return entry.path
         return None
 
-    def get_entry_by_ybn(self, ybn_name: str) -> Optional[YSTLEntry]:
+    def get_entry_by_ybn(self, ybn_name: str) -> YSTLEntry | None:
         for entry in self.entries:
             if entry.ybn_name == ybn_name:
                 return entry
